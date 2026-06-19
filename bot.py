@@ -328,20 +328,13 @@ def fmt_eta(seconds: float) -> str:
 
 
 def progress_bar(done: int, total: int, width: int = 12) -> str:
-    """Sleek Unicode progress bar with partial fill."""
+    """Dot-style progress bar: ● for filled, ○ for empty."""
     if total <= 0:
-        return "░" * width
+        return "○" * width
     pct = max(0.0, min(1.0, done / total))
-    filled = int(width * pct)
-    partial_idx = (width * pct - filled)
-    blocks = " ▏▎▍▌▋▊▉█"
-    bar = "█" * filled
-    if filled < width:
-        # Guard the index against float rounding (0..8 inclusive).
-        partial_char = blocks[max(0, min(8, int(partial_idx * 8)))]
-        bar += partial_char
-        bar += "░" * (width - filled - 1)
-    return bar
+    filled = round(width * pct)
+    filled = max(0, min(width, filled))
+    return "●" * filled + "○" * (width - filled)
 
 
 def make_progress_line(
@@ -351,29 +344,36 @@ def make_progress_line(
     speed_str: str = "",
     eta_str: str = "",
     width: int = 12,
+    elapsed_str: str = "",
+    file_idx: str = "",
 ) -> str:
-    """Build a single rich progress line for a file operation."""
+    """Build a single rich progress line for a file operation (tree style)."""
     if total_bytes > 0:
         pct = min(100, int(done_bytes * 100 / total_bytes))
         bar = progress_bar(done_bytes, total_bytes, width)
-        size_info = f"{fmt_size(done_bytes)} / {fmt_size(total_bytes)}"
+        processed = fmt_size(done_bytes)
+        total_sz = fmt_size(total_bytes)
     else:
         pct = 0
-        bar = "░" * width
-        size_info = fmt_size(done_bytes) if done_bytes else "…"
+        bar = "○" * width
+        processed = fmt_size(done_bytes) if done_bytes else "…"
+        total_sz = None
 
-    line = f"{label}\n"
-    line += f" `{bar}` **{pct}%**\n"
-    if size_info:
-        line += f" {size_info}\n"
-    speed_eta = ""
+    lines = [label, f"├ [{bar}] » {pct}%", f"├ Processed: {processed}"]
+    if total_sz:
+        lines.append(f"├ Total Size: {total_sz}")
     if speed_str:
-        speed_eta += f" ⚡ {speed_str}"
+        lines.append(f"├ Speed: {speed_str}")
     if eta_str and eta_str != "—":
-        speed_eta += f"  ⏱ {eta_str}"
-    if speed_eta:
-        line += speed_eta
-    return line
+        lines.append(f"├ ETA: {eta_str}")
+    if elapsed_str:
+        lines.append(f"├ Elapsed: {elapsed_str}")
+    if file_idx:
+        lines.append(f"├ File: {file_idx}")
+
+    # Close the tree branch: the final bullet becomes the corner.
+    lines[-1] = lines[-1].replace("├", "└", 1)
+    return "\n".join(lines)
 
 # ── rclone progress parser ───────────────────────────────────────
 _RCLONE_STATS_RE = re.compile(
@@ -758,8 +758,10 @@ async def _send_with_retry(coro_fn, *args, max_retries: int = 5, **kwargs):
 # ── Build the composite status board ─────────────────────────────────
 
 
-def _render_board(total_files: int, concurrent: int, progress_map: dict,
-                  total_dl_speed: str = "", total_ul_speed: str = "") -> str:
+def _render_board(total_files: int, concurrent: int, progress_map: dict) -> str:
+    header = f"📦 **{total_files} file(s)** · ⚡ **{concurrent} concurrent**\n"
+    separator = "━" * 24
+
     done = sum(1 for v in progress_map.values() if v.startswith("✅"))
     failed = sum(1 for v in progress_map.values() if v.startswith("❌"))
     active_entries = {
@@ -772,31 +774,24 @@ def _render_board(total_files: int, concurrent: int, progress_map: dict,
     else:
         body = "_No active jobs_"
 
-    sep = "━" * 28
-
-    stats_lines = [f"├ **Total:** {total_files} files  ✅ {done}  ❌ {failed}"]
-    dl = total_dl_speed or "—"
-    ul = total_ul_speed or "—"
-    stats_lines.append(f"├ **DL:** {dl}  **UL:** {ul}")
+    footer_lines = [f"├ Total:  ✅ {done}  ❌ {failed}"]
     if psutil is not None:
         try:
             cpu = psutil.cpu_percent(interval=None)
-            vm = psutil.virtual_memory()
-            stats_lines.append(f"├ **CPU:** {cpu:.0f}%  **RAM:** {vm.percent:.0f}%")
-        except Exception:
-            pass
+            ram = psutil.virtual_memory().percent
+            footer_lines.append(f"├ CPU: {cpu:.0f}%  RAM: {ram:.0f}%")
+        except Exception as e:
+            log.debug(f"_render_board psutil failed: {e}")
+
     try:
         du = shutil.disk_usage(DOWNLOAD_DIR)
-        stats_lines.append(f"└ **Disk:** {fmt_size(du.free)} free / {fmt_size(du.total)}")
-    except Exception:
-        pass
-    # Ensure last line uses └
-    for i, l in enumerate(stats_lines):
-        if i == len(stats_lines) - 1:
-            stats_lines[i] = l.replace("├", "└", 1)
+        footer_lines.append(f"├ Disk: {fmt_size(du.used)} | {fmt_size(du.total)}")
+    except Exception as e:
+        log.debug(f"_render_board disk failed: {e}")
 
-    footer = "\n".join(stats_lines)
-    text = f"{body}\n\n{sep}\n{footer}"
+    footer_lines[-1] = footer_lines[-1].replace("├", "└", 1)
+
+    text = header + "\n" + body + "\n\n" + separator + "\n" + "\n".join(footer_lines)
     if len(text) > 4000:
         truncated = text[:4000]
         cut = truncated.rfind("\n")
@@ -894,29 +889,42 @@ async def upload_part_with_progress(
         elapsed = loop.time() - upload_start[0]
         speed_bps = current / elapsed if elapsed > 0 else 0
         remaining = (total - current) / speed_bps if speed_bps > 0 else 0
-        speed_str = fmt_size(int(speed_bps)) + "/s" if speed_bps > 0 else "—"
+
+        speed_str = fmt_size(int(speed_bps)) + "/s" if speed_bps > 0 else ""
         eta_str = fmt_eta(remaining)
-        bar = progress_bar(current, total)
-        pct = min(100, int(current * 100 / total)) if total > 0 else 0
-        em, es = divmod(int(elapsed), 60)
+
         fname_disp = fname.split("/")[-1]
-        part_line = f"├ **Part:** {part_idx}/{total_parts}\n" if total_parts > 1 else ""
-        progress_map[idx] = (
-            f"`{fname_disp}`\n\n"
-            f"💡 _Uploading..._\n"
-            f"├ `[{bar}]` » {pct}%\n"
-            f"├ **Processed:** {fmt_size(current)}\n"
-            f"├ **Total Size:** {fmt_size(total)}\n"
-            f"├ **Speed:** {speed_str}\n"
-            f"├ **ETA:** {eta_str}\n"
-            f"├ **Elapsed:** {em}m{es}s\n"
-            f"{part_line}"
-            f"└ **File:** {idx}/{total_files}"
-        )
+        base_label = f"📤 `[{idx}/{total_files}]` `{fname_disp}`"
+        if total_parts > 1:
+            pct2 = min(100, int(current * 100 / total)) if total > 0 else 0
+            bar2 = progress_bar(current, total)
+            lines = [
+                base_label,
+                f"├ [{bar2}] » {pct2}%",
+                f"├ Part {part_idx}/{total_parts}",
+                f"├ Processed: {fmt_size(current)}",
+                f"├ Total Size: {fmt_size(total)}",
+            ]
+            if speed_str:
+                lines.append(f"├ Speed: {speed_str}")
+            if eta_str and eta_str != "—":
+                lines.append(f"├ ETA: {eta_str}")
+            lines.append(f"├ Elapsed: {fmt_eta(elapsed)}")
+            lines.append(f"├ File: {idx}/{total_files}")
+            lines[-1] = lines[-1].replace("├", "└", 1)
+            progress_map[idx] = "\n".join(lines)
+        else:
+            progress_map[idx] = make_progress_line(
+                base_label, current, total, speed_str, eta_str,
+                elapsed_str=fmt_eta(elapsed),
+                file_idx=f"{idx}/{total_files}",
+            )
         if board_state is not None:
             board_state.mark_dirty()
 
-    progress_map[idx] = make_progress_line(_make_label(), 0, file_size)
+    progress_map[idx] = make_progress_line(
+        _make_label(), 0, file_size, file_idx=f"{idx}/{total_files}"
+    )
     if board_state is not None:
         board_state.mark_dirty()
 
@@ -988,24 +996,18 @@ async def process_one_file(
         fname_display = fname.split("/")[-1]
 
         def dl_progress(done_bytes, total_bytes, pct, speed, eta):
-            bar = progress_bar(done_bytes, total_bytes)
-            elapsed = int(time.monotonic() - dl_start)
-            em, es = divmod(elapsed, 60)
-            progress_map[idx] = (
-                f"`{fname_display}`\n\n"
-                f"💡 _Downloading..._\n"
-                f"├ `[{bar}]` » {pct}%\n"
-                f"├ **Processed:** {fmt_size(done_bytes)}\n"
-                f"├ **Total Size:** {fmt_size(total_bytes)}\n"
-                f"├ **Speed:** {speed}\n"
-                f"├ **ETA:** {eta}\n"
-                f"├ **Elapsed:** {em}m{es}s\n"
-                f"└ **File:** {idx}/{total}"
+            progress_map[idx] = make_progress_line(
+                f"⬇️ `[{idx}/{total}]` `{fname_display}`",
+                done_bytes, total_bytes,
+                speed_str=speed,
+                eta_str=eta,
+                elapsed_str=fmt_eta(time.monotonic() - dl_start),
+                file_idx=f"{idx}/{total}",
             )
             if board_state is not None:
                 board_state.mark_dirty()
 
-        progress_map[idx] = f"`{fname_display}`\n\n💡 _Connecting..._"
+        progress_map[idx] = f"⬇️ `[{idx}/{total}]` Connecting to `{fname_display}`…"
         await _push_board(status_msg, total, job_concurrent, progress_map,
                           board_state=board_state)
 
@@ -1029,7 +1031,7 @@ async def process_one_file(
 
         progress_map[idx] = (
             f"✅⬇️ `[{idx}/{total}]` `{fname_display}`\n"
-            f"    `{'█' * 12}` **100%**  {fmt_size(file_size)}"
+            f"└ [{'●' * 12}] » 100%  {fmt_size(file_size)}"
             + (f"  ⚡ avg {dl_speed}" if dl_speed else "")
         )
         await _push_board(status_msg, total, job_concurrent, progress_map,
