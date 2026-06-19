@@ -486,6 +486,7 @@ def rclone_download(
     ]
     if RCLONE_FLAGS:
         cmd += RCLONE_FLAGS.split()
+    log.info(f"rclone cmd: {' '.join(cmd)}")
 
     proc = subprocess.Popen(
         cmd,
