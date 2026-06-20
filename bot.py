@@ -1718,8 +1718,16 @@ async def _main():
         await uploader.start()
         log.info("User-session uploader client started — uploads will use the user account")
     try:
-        from pyrogram import idle
-        await idle()
+        # NOTE: deliberately NOT using pyrogram.idle() here. idle() installs
+        # its own SIGINT/SIGTERM handlers and is meant to be the *only* thing
+        # keeping a script alive in place of app.run(). Since this coroutine
+        # is itself running inside app.run(_main()), app.run() is already
+        # responsible for the bot's lifecycle and for keeping the process
+        # alive — stacking idle() on top of that conflicts with it and was
+        # the cause of the bot connecting fine but never actually responding
+        # to incoming messages. A plain indefinite wait is enough; app.run()
+        # stops this coroutine (and the whole process) on shutdown.
+        await asyncio.Event().wait()
     finally:
         if uploader is not None:
             await uploader.stop()
