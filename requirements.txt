@@ -1,10 +1,4 @@
-pyrotgfork
-pytgcrypto
-psutil==5.9.8
-motor
+pyrogram
+tgcrypto
+psutil
 pymongo
-#pyrofork==2.3.42
-#TgCrypto
-#pyrogram==2.0.106
-#TgCrypto==1.2.5
-
