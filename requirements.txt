@@ -1,6 +1,8 @@
 pyrotgfork
 pytgcrypto
 psutil==5.9.8
+motor
+pymongo
 #pyrofork==2.3.42
 #TgCrypto
 #pyrogram==2.0.106
